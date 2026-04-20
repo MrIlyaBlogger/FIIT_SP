@@ -66,6 +66,7 @@ private:
         void* _free_ptr;
 
     public:
+        friend class allocator_sorted_list;
 
         using iterator_category = std::forward_iterator_tag;
         using value_type = void*;
@@ -97,6 +98,7 @@ private:
         void* _trusted_memory;
 
     public:
+        friend class allocator_sorted_list;
 
         using iterator_category = std::forward_iterator_tag;
         using value_type = void*;

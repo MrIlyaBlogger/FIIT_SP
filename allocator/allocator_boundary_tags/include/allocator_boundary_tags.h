@@ -77,6 +77,7 @@ private:
         void* _trusted_memory;
 
     public:
+        friend class allocator_boundary_tags;
 
         using iterator_category = std::bidirectional_iterator_tag;
         using value_type = void*;

@@ -106,6 +106,7 @@ private:
         void* _block;
 
     public:
+        friend class allocator_buddies_system;
 
         using iterator_category = std::forward_iterator_tag;
         using value_type = void*;

@@ -76,6 +76,7 @@ private:
         void* _trusted;
 
     public:
+        friend class allocator_red_black_tree;
 
         using iterator_category = std::forward_iterator_tag;
         using value_type = void*;
