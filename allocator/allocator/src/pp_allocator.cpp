@@ -4,14 +4,25 @@
 
 #include "pp_allocator.h"
 
+#include <new>
 
-void smart_mem_resource::do_deallocate(void *p, size_t, size_t)
+
+void smart_mem_resource::do_deallocate(void *p, size_t bytes, size_t alignment)
 {
+    if (alignment > __STDCPP_DEFAULT_NEW_ALIGNMENT__)
+    {
+        ::operator delete(p, bytes, std::align_val_t(alignment));
+        return;
+    }
     do_deallocate_sm(p);
 }
 
 void *smart_mem_resource::do_allocate(size_t _Bytes, size_t _Align)
 {
+    if (_Align > __STDCPP_DEFAULT_NEW_ALIGNMENT__)
+    {
+        return ::operator new(_Bytes, std::align_val_t(_Align));
+    }
     return do_allocate_sm(_Bytes);
 }
 

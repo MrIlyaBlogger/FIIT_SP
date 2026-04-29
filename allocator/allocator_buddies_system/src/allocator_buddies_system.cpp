@@ -2,66 +2,194 @@
 
 #include <algorithm>
 #include <cstring>
+#include <limits>
+#include <new>
 #include <stdexcept>
-#include <unordered_map>
 
 namespace
 {
-    struct buddy_block_metadata
+    constexpr size_t align_up(size_t value, size_t alignment) noexcept
     {
-        bool occupied : 1;
-        unsigned char size : 7;
-    };
+        return (value + alignment - 1) / alignment * alignment;
+    }
 
-    constexpr size_t buddy_occupied_block_metadata_size = sizeof(buddy_block_metadata) + sizeof(void *);
-    constexpr size_t buddy_min_k = __detail::nearest_greater_k_of_2(buddy_occupied_block_metadata_size);
-
-    struct buddy_block
+    struct buddy_header
     {
-        size_t offset;
-        size_t size;
+        unsigned char order;
         bool occupied;
     };
 
-    struct buddy_state
+    struct allocator_state
     {
         std::pmr::memory_resource *parent;
         allocator_with_fit_mode::fit_mode mode;
-        size_t space_size;
-        std::vector<buddy_block> blocks;
+        size_t user_space_size;
+        size_t allocated_size;
+        unsigned char max_order;
+        std::mutex mutex;
     };
 
-    std::unordered_map<void *, buddy_state> g_buddy_states;
-    std::mutex g_buddy_states_mutex;
+    constexpr size_t state_offset = align_up(sizeof(allocator_state), alignof(std::max_align_t));
+    constexpr size_t occupied_metadata_size = sizeof(buddy_header);
 
-    buddy_state &state_for(void *trusted_memory)
+    allocator_state *state_of(void *trusted) noexcept
     {
-        return g_buddy_states.at(trusted_memory);
+        return static_cast<allocator_state *>(trusted);
     }
 
-    const buddy_state &state_for(const void *trusted_memory)
+    const allocator_state *state_of(const void *trusted) noexcept
     {
-        return g_buddy_states.at(const_cast<void *>(trusted_memory));
+        return static_cast<const allocator_state *>(trusted);
+    }
+
+    unsigned char *pool_begin(void *trusted) noexcept
+    {
+        return static_cast<unsigned char *>(trusted) + state_offset;
+    }
+
+    const unsigned char *pool_begin(const void *trusted) noexcept
+    {
+        return static_cast<const unsigned char *>(trusted) + state_offset;
+    }
+
+    bool is_power_of_two(size_t value) noexcept
+    {
+        return value != 0 && (value & (value - 1)) == 0;
     }
 
     size_t round_up_power_of_two(size_t value)
     {
+        if (value == 0)
+        {
+            return 1;
+        }
+
         size_t power = 1;
         while (power < value)
         {
+            if (power > (std::numeric_limits<size_t>::max() >> 1U))
+            {
+                throw std::bad_alloc();
+            }
             power <<= 1U;
         }
         return power;
     }
 
-    size_t minimum_buddy_block_size()
+    unsigned char order_of(size_t value)
     {
-        return size_t{1} << buddy_min_k;
+        unsigned char order = 0;
+        while ((size_t{1} << order) < value)
+        {
+            ++order;
+        }
+        return order;
     }
 
-    size_t required_buddy_block(size_t payload)
+    size_t size_of(const buddy_header *block) noexcept
     {
-        return round_up_power_of_two(std::max(payload + buddy_occupied_block_metadata_size, minimum_buddy_block_size()));
+        return size_t{1} << block->order;
+    }
+
+    size_t minimum_block_size() noexcept
+    {
+        return size_t{1} << __detail::nearest_greater_k_of_2(sizeof(allocator_dbg_helper::block_pointer_t) + 1);
+    }
+
+    size_t required_block_size(size_t payload)
+    {
+        return round_up_power_of_two(std::max(payload + occupied_metadata_size, minimum_block_size()));
+    }
+
+    buddy_header *next_block(buddy_header *block) noexcept
+    {
+        return reinterpret_cast<buddy_header *>(reinterpret_cast<unsigned char *>(block) + size_of(block));
+    }
+
+    const buddy_header *next_block(const buddy_header *block) noexcept
+    {
+        return reinterpret_cast<const buddy_header *>(reinterpret_cast<const unsigned char *>(block) + size_of(block));
+    }
+
+    buddy_header *find_block_by_payload(allocator_state *state, void *payload)
+    {
+        auto *begin = pool_begin(state);
+        auto *end = begin + state->user_space_size;
+        auto *ptr = static_cast<unsigned char *>(payload);
+
+        if (ptr < begin + occupied_metadata_size || ptr >= end)
+        {
+            throw std::logic_error("allocator_buddies_system deallocate out of range");
+        }
+
+        for (auto *block = reinterpret_cast<buddy_header *>(begin);
+             reinterpret_cast<unsigned char *>(block) < end;
+             block = next_block(block))
+        {
+            if (reinterpret_cast<unsigned char *>(block) + occupied_metadata_size == ptr)
+            {
+                return block;
+            }
+        }
+
+        throw std::logic_error("allocator_buddies_system deallocate invalid block");
+    }
+
+    buddy_header *find_buddy(allocator_state *state, buddy_header *block) noexcept
+    {
+        auto *begin = pool_begin(state);
+        const size_t block_size = size_of(block);
+        const size_t offset = static_cast<size_t>(reinterpret_cast<unsigned char *>(block) - begin);
+        const size_t buddy_offset = offset ^ block_size;
+
+        for (auto *candidate = reinterpret_cast<buddy_header *>(begin);
+             reinterpret_cast<unsigned char *>(candidate) < begin + state->user_space_size;
+             candidate = next_block(candidate))
+        {
+            if (static_cast<size_t>(reinterpret_cast<unsigned char *>(candidate) - begin) == buddy_offset)
+            {
+                return candidate;
+            }
+        }
+        return nullptr;
+    }
+}
+
+allocator_buddies_system::allocator_buddies_system(
+    size_t space_size,
+    std::pmr::memory_resource *parent_allocator,
+    allocator_with_fit_mode::fit_mode allocate_fit_mode)
+{
+    const size_t rounded_space = round_up_power_of_two(space_size);
+    if (space_size < minimum_block_size() || !is_power_of_two(rounded_space))
+    {
+        throw std::logic_error("allocator_buddies_system requires a larger power-of-two block");
+    }
+
+    auto *resource = parent_allocator == nullptr ? std::pmr::get_default_resource() : parent_allocator;
+    const size_t allocated_size = state_offset + rounded_space;
+    _trusted_memory = resource->allocate(allocated_size, alignof(std::max_align_t));
+
+    try
+    {
+        auto *state = new (_trusted_memory) allocator_state{
+            .parent = resource,
+            .mode = allocate_fit_mode,
+            .user_space_size = rounded_space,
+            .allocated_size = allocated_size,
+            .max_order = order_of(rounded_space),
+            .mutex = {}
+        };
+
+        auto *first = reinterpret_cast<buddy_header *>(pool_begin(_trusted_memory));
+        first->order = state->max_order;
+        first->occupied = false;
+    }
+    catch (...)
+    {
+        resource->deallocate(_trusted_memory, allocated_size, alignof(std::max_align_t));
+        _trusted_memory = nullptr;
+        throw;
     }
 }
 
@@ -72,24 +200,21 @@ allocator_buddies_system::~allocator_buddies_system()
         return;
     }
 
-    std::lock_guard<std::mutex> guard(g_buddy_states_mutex);
-    auto it = g_buddy_states.find(_trusted_memory);
-    if (it != g_buddy_states.end())
-    {
-        it->second.parent->deallocate(_trusted_memory, it->second.space_size, alignof(std::max_align_t));
-        g_buddy_states.erase(it);
-    }
+    auto *state = state_of(_trusted_memory);
+    auto *parent = state->parent;
+    const size_t allocated_size = state->allocated_size;
+    state->mutex.~mutex();
+    parent->deallocate(_trusted_memory, allocated_size, alignof(std::max_align_t));
+    _trusted_memory = nullptr;
 }
 
-allocator_buddies_system::allocator_buddies_system(
-    allocator_buddies_system &&other) noexcept:
+allocator_buddies_system::allocator_buddies_system(allocator_buddies_system &&other) noexcept:
     _trusted_memory(other._trusted_memory)
 {
     other._trusted_memory = nullptr;
 }
 
-allocator_buddies_system &allocator_buddies_system::operator=(
-    allocator_buddies_system &&other) noexcept
+allocator_buddies_system &allocator_buddies_system::operator=(allocator_buddies_system &&other) noexcept
 {
     if (this == &other)
     {
@@ -102,152 +227,20 @@ allocator_buddies_system &allocator_buddies_system::operator=(
     return *this;
 }
 
-allocator_buddies_system::allocator_buddies_system(
-        size_t space_size,
-        std::pmr::memory_resource *parent_allocator,
-        allocator_with_fit_mode::fit_mode allocate_fit_mode)
+allocator_buddies_system::allocator_buddies_system(const allocator_buddies_system &other)
 {
-    const size_t rounded_space = round_up_power_of_two(space_size);
-    if (rounded_space < minimum_buddy_block_size())
+    auto *other_state = state_of(other._trusted_memory);
+    allocator_buddies_system copy(other_state->user_space_size, other_state->parent, other_state->mode);
+
     {
-        throw std::logic_error("allocator_buddies_system requires a larger power-of-two block");
+        std::lock_guard<std::mutex> lock(other_state->mutex);
+        auto *copy_state = state_of(copy._trusted_memory);
+        std::memcpy(pool_begin(copy._trusted_memory), pool_begin(other._trusted_memory), other_state->user_space_size);
+        copy_state->mode = other_state->mode;
     }
 
-    auto *resource = parent_allocator == nullptr ? std::pmr::get_default_resource() : parent_allocator;
-    _trusted_memory = resource->allocate(rounded_space, alignof(std::max_align_t));
-
-    std::lock_guard<std::mutex> guard(g_buddy_states_mutex);
-    g_buddy_states[_trusted_memory] = buddy_state{
-        .parent = resource,
-        .mode = allocate_fit_mode,
-        .space_size = rounded_space,
-        .blocks = { buddy_block{ .offset = 0, .size = rounded_space, .occupied = false } }
-    };
-}
-
-[[nodiscard]] void *allocator_buddies_system::do_allocate_sm(
-    size_t size)
-{
-    std::lock_guard<std::mutex> guard(g_buddy_states_mutex);
-    auto &state = state_for(_trusted_memory);
-    const size_t wanted = required_buddy_block(size);
-
-    size_t selected = state.blocks.size();
-    for (size_t i = 0; i < state.blocks.size(); ++i)
-    {
-        const auto &block = state.blocks[i];
-        if (block.occupied || block.size < wanted)
-        {
-            continue;
-        }
-
-        if (selected == state.blocks.size())
-        {
-            selected = i;
-            if (state.mode == fit_mode::first_fit)
-            {
-                break;
-            }
-            continue;
-        }
-
-        if (state.mode == fit_mode::the_best_fit && block.size < state.blocks[selected].size)
-        {
-            selected = i;
-        }
-        if (state.mode == fit_mode::the_worst_fit && block.size > state.blocks[selected].size)
-        {
-            selected = i;
-        }
-    }
-
-    if (selected == state.blocks.size())
-    {
-        throw std::bad_alloc();
-    }
-
-    while (state.blocks[selected].size / 2 >= wanted && state.blocks[selected].size / 2 >= minimum_buddy_block_size())
-    {
-        const auto current = state.blocks[selected];
-        const size_t half = current.size / 2;
-        state.blocks[selected] = buddy_block{ .offset = current.offset, .size = half, .occupied = false };
-        state.blocks.insert(
-            state.blocks.begin() + static_cast<ptrdiff_t>(selected + 1),
-            buddy_block{ .offset = current.offset + half, .size = half, .occupied = false });
-    }
-
-    state.blocks[selected].occupied = true;
-    return reinterpret_cast<unsigned char *>(_trusted_memory) + state.blocks[selected].offset + buddy_occupied_block_metadata_size;
-}
-
-void allocator_buddies_system::do_deallocate_sm(void *at)
-{
-    std::lock_guard<std::mutex> guard(g_buddy_states_mutex);
-    auto &state = state_for(_trusted_memory);
-    auto *base = reinterpret_cast<unsigned char *>(_trusted_memory);
-    auto *ptr = reinterpret_cast<unsigned char *>(at);
-
-    if (ptr < base + buddy_occupied_block_metadata_size || ptr >= base + state.space_size)
-    {
-        throw std::logic_error("allocator_buddies_system deallocate out of range");
-    }
-
-    const size_t offset = static_cast<size_t>(ptr - base - buddy_occupied_block_metadata_size);
-    auto it = std::find_if(
-        state.blocks.begin(),
-        state.blocks.end(),
-        [offset](const buddy_block &block)
-        {
-            return block.offset == offset;
-        });
-
-    if (it == state.blocks.end() || !it->occupied)
-    {
-        throw std::logic_error("allocator_buddies_system deallocate invalid block");
-    }
-
-    it->occupied = false;
-
-    bool merged = true;
-    while (merged)
-    {
-        merged = false;
-        std::sort(
-            state.blocks.begin(),
-            state.blocks.end(),
-            [](const buddy_block &lhs, const buddy_block &rhs)
-            {
-                return lhs.offset < rhs.offset;
-            });
-
-        for (size_t i = 0; i + 1 < state.blocks.size(); ++i)
-        {
-            auto &left = state.blocks[i];
-            auto &right = state.blocks[i + 1];
-            if (left.occupied || right.occupied || left.size != right.size)
-            {
-                continue;
-            }
-
-            if ((left.offset ^ left.size) == right.offset && left.offset + left.size == right.offset)
-            {
-                left.size *= 2;
-                state.blocks.erase(state.blocks.begin() + static_cast<ptrdiff_t>(i + 1));
-                merged = true;
-                break;
-            }
-        }
-    }
-}
-
-allocator_buddies_system::allocator_buddies_system(const allocator_buddies_system &other):
-    allocator_buddies_system(state_for(other._trusted_memory).space_size, state_for(other._trusted_memory).parent, state_for(other._trusted_memory).mode)
-{
-    std::lock_guard<std::mutex> guard(g_buddy_states_mutex);
-    const auto &other_state = state_for(other._trusted_memory);
-    auto &this_state = state_for(_trusted_memory);
-    std::memcpy(_trusted_memory, other._trusted_memory, other_state.space_size);
-    this_state.blocks = other_state.blocks;
+    _trusted_memory = copy._trusted_memory;
+    copy._trusted_memory = nullptr;
 }
 
 allocator_buddies_system &allocator_buddies_system::operator=(const allocator_buddies_system &other)
@@ -257,9 +250,96 @@ allocator_buddies_system &allocator_buddies_system::operator=(const allocator_bu
         return *this;
     }
 
-    auto copy(other);
+    allocator_buddies_system copy(other);
     *this = std::move(copy);
     return *this;
+}
+
+[[nodiscard]] void *allocator_buddies_system::do_allocate_sm(size_t size)
+{
+    auto *state = state_of(_trusted_memory);
+    std::lock_guard<std::mutex> lock(state->mutex);
+    const size_t wanted = required_block_size(size);
+    buddy_header *selected = nullptr;
+    auto *end = pool_begin(_trusted_memory) + state->user_space_size;
+
+    for (auto *block = reinterpret_cast<buddy_header *>(pool_begin(_trusted_memory));
+         reinterpret_cast<unsigned char *>(block) < end;
+         block = next_block(block))
+    {
+        if (block->occupied || size_of(block) < wanted)
+        {
+            continue;
+        }
+
+        if (selected == nullptr)
+        {
+            selected = block;
+            if (state->mode == fit_mode::first_fit)
+            {
+                break;
+            }
+            continue;
+        }
+
+        if (state->mode == fit_mode::the_best_fit && size_of(block) < size_of(selected))
+        {
+            selected = block;
+        }
+        else if (state->mode == fit_mode::the_worst_fit && size_of(block) > size_of(selected))
+        {
+            selected = block;
+        }
+    }
+
+    if (selected == nullptr)
+    {
+        throw std::bad_alloc();
+    }
+
+    while (size_of(selected) / 2 >= wanted && size_of(selected) / 2 >= minimum_block_size())
+    {
+        --selected->order;
+        auto *right = reinterpret_cast<buddy_header *>(reinterpret_cast<unsigned char *>(selected) + size_of(selected));
+        right->order = selected->order;
+        right->occupied = false;
+    }
+
+    selected->occupied = true;
+    return reinterpret_cast<unsigned char *>(selected) + occupied_metadata_size;
+}
+
+void allocator_buddies_system::do_deallocate_sm(void *at)
+{
+    if (at == nullptr)
+    {
+        return;
+    }
+
+    auto *state = state_of(_trusted_memory);
+    std::lock_guard<std::mutex> lock(state->mutex);
+    auto *block = find_block_by_payload(state, at);
+    if (!block->occupied)
+    {
+        throw std::logic_error("allocator_buddies_system deallocate invalid block");
+    }
+
+    block->occupied = false;
+    while (block->order < state->max_order)
+    {
+        auto *buddy = find_buddy(state, block);
+        if (buddy == nullptr || buddy->occupied || buddy->order != block->order)
+        {
+            break;
+        }
+
+        if (buddy < block)
+        {
+            block = buddy;
+        }
+        ++block->order;
+        block->occupied = false;
+    }
 }
 
 bool allocator_buddies_system::do_is_equal(const std::pmr::memory_resource &other) const noexcept
@@ -267,44 +347,38 @@ bool allocator_buddies_system::do_is_equal(const std::pmr::memory_resource &othe
     return dynamic_cast<const allocator_buddies_system *>(&other) != nullptr;
 }
 
-inline void allocator_buddies_system::set_fit_mode(
-    allocator_with_fit_mode::fit_mode mode)
+void allocator_buddies_system::set_fit_mode(allocator_with_fit_mode::fit_mode mode)
 {
-    std::lock_guard<std::mutex> guard(g_buddy_states_mutex);
-    state_for(_trusted_memory).mode = mode;
+    auto *state = state_of(_trusted_memory);
+    std::lock_guard<std::mutex> lock(state->mutex);
+    state->mode = mode;
 }
-
 
 std::vector<allocator_test_utils::block_info> allocator_buddies_system::get_blocks_info() const noexcept
 {
-    std::lock_guard<std::mutex> guard(g_buddy_states_mutex);
+    auto *state = state_of(_trusted_memory);
+    std::lock_guard<std::mutex> lock(state->mutex);
     return get_blocks_info_inner();
 }
 
 std::vector<allocator_test_utils::block_info> allocator_buddies_system::get_blocks_info_inner() const
 {
-    const auto &state = state_for(_trusted_memory);
+    const auto *state = state_of(_trusted_memory);
     std::vector<allocator_test_utils::block_info> result;
-    result.reserve(state.blocks.size());
-    for (const auto &block : state.blocks)
+    const auto *end = pool_begin(_trusted_memory) + state->user_space_size;
+
+    for (auto *block = reinterpret_cast<const buddy_header *>(pool_begin(_trusted_memory));
+         reinterpret_cast<const unsigned char *>(block) < end;
+         block = next_block(block))
     {
-        result.push_back({ .block_size = block.size, .is_block_occupied = block.occupied });
+        result.push_back({ .block_size = size_of(block), .is_block_occupied = block->occupied });
     }
     return result;
 }
 
 allocator_buddies_system::buddy_iterator allocator_buddies_system::begin() const noexcept
 {
-    std::lock_guard<std::mutex> guard(g_buddy_states_mutex);
-    const auto &state = state_for(_trusted_memory);
-    buddy_iterator it;
-    if (state.blocks.empty())
-    {
-        it._block = nullptr;
-        return it;
-    }
-    it._block = reinterpret_cast<unsigned char *>(_trusted_memory) + state.blocks.front().offset;
-    return it;
+    return buddy_iterator(pool_begin(_trusted_memory));
 }
 
 allocator_buddies_system::buddy_iterator allocator_buddies_system::end() const noexcept
@@ -312,52 +386,20 @@ allocator_buddies_system::buddy_iterator allocator_buddies_system::end() const n
     return buddy_iterator();
 }
 
-bool allocator_buddies_system::buddy_iterator::operator==(const allocator_buddies_system::buddy_iterator &other) const noexcept
+bool allocator_buddies_system::buddy_iterator::operator==(const buddy_iterator &other) const noexcept
 {
     return _block == other._block;
 }
 
-bool allocator_buddies_system::buddy_iterator::operator!=(const allocator_buddies_system::buddy_iterator &other) const noexcept
+bool allocator_buddies_system::buddy_iterator::operator!=(const buddy_iterator &other) const noexcept
 {
     return !(*this == other);
 }
 
 allocator_buddies_system::buddy_iterator &allocator_buddies_system::buddy_iterator::operator++() & noexcept
 {
-    if (_block == nullptr)
-    {
-        return *this;
-    }
-
-    std::lock_guard<std::mutex> guard(g_buddy_states_mutex);
-    for (const auto &[trusted, state] : g_buddy_states)
-    {
-        auto *base = reinterpret_cast<unsigned char *>(trusted);
-        auto *current = reinterpret_cast<unsigned char *>(_block);
-        if (current < base || current >= base + state.space_size)
-        {
-            continue;
-        }
-
-        const size_t offset = static_cast<size_t>(current - base);
-        for (size_t i = 0; i < state.blocks.size(); ++i)
-        {
-            if (state.blocks[i].offset == offset)
-            {
-                if (i + 1 < state.blocks.size())
-                {
-                    _block = base + state.blocks[i + 1].offset;
-                }
-                else
-                {
-                    _block = nullptr;
-                }
-                return *this;
-            }
-        }
-    }
-
-    _block = nullptr;
+    auto *block = static_cast<buddy_header *>(_block);
+    _block = block == nullptr ? nullptr : reinterpret_cast<unsigned char *>(block) + size_of(block);
     return *this;
 }
 
@@ -370,58 +412,14 @@ allocator_buddies_system::buddy_iterator allocator_buddies_system::buddy_iterato
 
 size_t allocator_buddies_system::buddy_iterator::size() const noexcept
 {
-    if (_block == nullptr)
-    {
-        return 0;
-    }
-
-    std::lock_guard<std::mutex> guard(g_buddy_states_mutex);
-    for (const auto &[trusted, state] : g_buddy_states)
-    {
-        auto *base = reinterpret_cast<unsigned char *>(trusted);
-        auto *current = reinterpret_cast<unsigned char *>(_block);
-        if (current < base || current >= base + state.space_size)
-        {
-            continue;
-        }
-        const size_t offset = static_cast<size_t>(current - base);
-        for (const auto &block : state.blocks)
-        {
-            if (block.offset == offset)
-            {
-                return block.size;
-            }
-        }
-    }
-    return 0;
+    auto *block = static_cast<buddy_header *>(_block);
+    return block == nullptr ? 0 : size_of(block);
 }
 
 bool allocator_buddies_system::buddy_iterator::occupied() const noexcept
 {
-    if (_block == nullptr)
-    {
-        return false;
-    }
-
-    std::lock_guard<std::mutex> guard(g_buddy_states_mutex);
-    for (const auto &[trusted, state] : g_buddy_states)
-    {
-        auto *base = reinterpret_cast<unsigned char *>(trusted);
-        auto *current = reinterpret_cast<unsigned char *>(_block);
-        if (current < base || current >= base + state.space_size)
-        {
-            continue;
-        }
-        const size_t offset = static_cast<size_t>(current - base);
-        for (const auto &block : state.blocks)
-        {
-            if (block.offset == offset)
-            {
-                return block.occupied;
-            }
-        }
-    }
-    return false;
+    auto *block = static_cast<buddy_header *>(_block);
+    return block != nullptr && block->occupied;
 }
 
 void *allocator_buddies_system::buddy_iterator::operator*() const noexcept
@@ -429,12 +427,12 @@ void *allocator_buddies_system::buddy_iterator::operator*() const noexcept
     return _block;
 }
 
-allocator_buddies_system::buddy_iterator::buddy_iterator(void *start):
-    _block(start)
+allocator_buddies_system::buddy_iterator::buddy_iterator():
+    _block(nullptr)
 {
 }
 
-allocator_buddies_system::buddy_iterator::buddy_iterator():
-    _block(nullptr)
+allocator_buddies_system::buddy_iterator::buddy_iterator(void *start):
+    _block(start)
 {
 }
