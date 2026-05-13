@@ -10,3 +10,6 @@ target_link_libraries(
         sys_prog_assctv_cntnr_indxng_tr_b_str_pls_tr_tests
         PRIVATE
         sys_prog_assctv_cntnr_indxng_tr_b_str_pls_tr)
+add_test(
+        NAME sys_prog_assctv_cntnr_indxng_tr_b_str_pls_tr_tests
+        COMMAND sys_prog_assctv_cntnr_indxng_tr_b_str_pls_tr_tests)

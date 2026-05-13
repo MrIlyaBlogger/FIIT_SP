@@ -10,3 +10,6 @@ target_link_libraries(
         sys_prog_allctr_allctr_bndr_tgs_tests
         PRIVATE
         sys_prog_allctr_allctr_bndr_tgs)
+add_test(
+        NAME sys_prog_allctr_allctr_bndr_tgs_tests
+        COMMAND sys_prog_allctr_allctr_bndr_tgs_tests)

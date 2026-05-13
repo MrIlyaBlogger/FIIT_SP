@@ -1,3 +1,6 @@
+#include "b_tree_impl.h"
+
+#if 0
 #ifndef SYS_PROG_B_TREE_H
 #define SYS_PROG_B_TREE_H
 
@@ -1186,4 +1189,5 @@ bool compare_keys(const tkey &lhs, const tkey &rhs)
 }
 
 
+#endif
 #endif

@@ -5,6 +5,9 @@
 .vscode
 build*
 cmake-build-*
+third_party/boost*/
+third_party/boost*.tar.*
+third_party/boost*.zip
 *.txt
 !CMakeLists.txt
 

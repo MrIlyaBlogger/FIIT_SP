@@ -10,3 +10,6 @@ target_link_libraries(
         sys_prog_allctr_allctr_glbl_hp_tests
         PRIVATE
         sys_prog_allctr_allctr_glbl_hp)
+add_test(
+        NAME sys_prog_allctr_allctr_glbl_hp_tests
+        COMMAND sys_prog_allctr_allctr_glbl_hp_tests)
