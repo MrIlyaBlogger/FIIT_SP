@@ -92,12 +92,14 @@ private:
 
     size_t lower_index(const std::pmr::vector<tree_data_type> &keys, const tkey &key) const
     {
-        size_t index = 0;
-        while (index < keys.size() && less_key(keys[index].first, key))
-        {
-            ++index;
-        }
-        return index;
+        const auto it = std::lower_bound(
+            keys.begin(),
+            keys.end(),
+            key,
+            [this](const tree_data_type &data, const tkey &value) {
+                return less_key(data.first, value);
+            });
+        return static_cast<size_t>(std::distance(keys.begin(), it));
     }
 
     node_allocator nodes_allocator() const noexcept
@@ -289,6 +291,45 @@ private:
         return take_greatest(ptr->children.back());
     }
 
+
+    tree_data_type *find_data_ptr(const tkey &key)
+    {
+        node *current = _root;
+        while (current != nullptr)
+        {
+            const size_t index = lower_index(current->keys, key);
+            if (index < current->keys.size() && equivalent_key(current->keys[index].first, key))
+            {
+                return &current->keys[index];
+            }
+            if (current->leaf())
+            {
+                break;
+            }
+            current = current->children[index];
+        }
+        return nullptr;
+    }
+
+    const tree_data_type *find_data_ptr(const tkey &key) const
+    {
+        const node *current = _root;
+        while (current != nullptr)
+        {
+            const size_t index = lower_index(current->keys, key);
+            if (index < current->keys.size() && equivalent_key(current->keys[index].first, key))
+            {
+                return &current->keys[index];
+            }
+            if (current->leaf())
+            {
+                break;
+            }
+            current = current->children[index];
+        }
+        return nullptr;
+    }
+
     bool erase_inner(node *ptr, const tkey &key)
     {
         const size_t index = lower_index(ptr->keys, key);
@@ -426,6 +467,13 @@ public:
         {
         }
 
+        explicit btree_iterator(B_tree *owner, std::vector<place> order, size_t position = 0) :
+            _owner(owner),
+            _order(std::move(order)),
+            _position(position)
+        {
+        }
+
         reference operator*() const
         {
             const auto &item = current();
@@ -522,6 +570,13 @@ public:
         explicit btree_const_iterator(const B_tree *owner = nullptr, size_t position = 0) :
             _owner(owner),
             _order(owner == nullptr ? std::vector<const_place>{} : owner->order()),
+            _position(position)
+        {
+        }
+
+        explicit btree_const_iterator(const B_tree *owner, std::vector<const_place> order, size_t position = 0) :
+            _owner(owner),
+            _order(std::move(order)),
             _position(position)
         {
         }
@@ -659,22 +714,22 @@ public:
 
     tvalue &at(const tkey &key)
     {
-        auto it = find(key);
-        if (it == end())
+        tree_data_type *data = find_data_ptr(key);
+        if (data == nullptr)
         {
             throw key_not_found();
         }
-        return it->second;
+        return data->second;
     }
 
     const tvalue &at(const tkey &key) const
     {
-        auto it = find(key);
-        if (it == cend())
+        const tree_data_type *data = find_data_ptr(key);
+        if (data == nullptr)
         {
             throw key_not_found();
         }
-        return it->second;
+        return data->second;
     }
 
     tvalue &operator[](const tkey &key)
@@ -714,10 +769,10 @@ public:
         {
             if (equivalent_key(items[i].where->keys[items[i].index].first, key))
             {
-                return btree_iterator(this, i);
+                return btree_iterator(this, std::move(items), i);
             }
         }
-        return end();
+        return btree_iterator(this, std::move(items), _size);
     }
 
     btree_const_iterator find(const tkey &key) const
@@ -727,10 +782,10 @@ public:
         {
             if (equivalent_key(items[i].where->keys[items[i].index].first, key))
             {
-                return btree_const_iterator(this, i);
+                return btree_const_iterator(this, std::move(items), i);
             }
         }
-        return cend();
+        return btree_const_iterator(this, std::move(items), _size);
     }
 
     btree_iterator lower_bound(const tkey &key)
@@ -740,10 +795,10 @@ public:
         {
             if (!less_key(items[i].where->keys[items[i].index].first, key))
             {
-                return btree_iterator(this, i);
+                return btree_iterator(this, std::move(items), i);
             }
         }
-        return end();
+        return btree_iterator(this, std::move(items), _size);
     }
 
     btree_const_iterator lower_bound(const tkey &key) const
@@ -753,10 +808,10 @@ public:
         {
             if (!less_key(items[i].where->keys[items[i].index].first, key))
             {
-                return btree_const_iterator(this, i);
+                return btree_const_iterator(this, std::move(items), i);
             }
         }
-        return cend();
+        return btree_const_iterator(this, std::move(items), _size);
     }
 
     btree_iterator upper_bound(const tkey &key)
@@ -764,12 +819,12 @@ public:
         auto items = order();
         for (size_t i = 0; i < items.size(); ++i)
         {
-            if (!less_key(items[i].where->keys[items[i].index].first, key))
+            if (less_key(key, items[i].where->keys[items[i].index].first))
             {
-                return btree_iterator(this, i);
+                return btree_iterator(this, std::move(items), i);
             }
         }
-        return end();
+        return btree_iterator(this, std::move(items), _size);
     }
 
     btree_const_iterator upper_bound(const tkey &key) const
@@ -777,17 +832,17 @@ public:
         auto items = order();
         for (size_t i = 0; i < items.size(); ++i)
         {
-            if (!less_key(items[i].where->keys[items[i].index].first, key))
+            if (less_key(key, items[i].where->keys[items[i].index].first))
             {
-                return btree_const_iterator(this, i);
+                return btree_const_iterator(this, std::move(items), i);
             }
         }
-        return cend();
+        return btree_const_iterator(this, std::move(items), _size);
     }
 
     bool contains(const tkey &key) const
     {
-        return find(key) != cend();
+        return find_data_ptr(key) != nullptr;
     }
 
     void clear() noexcept
@@ -811,9 +866,10 @@ public:
     std::pair<btree_iterator, bool> emplace(Args &&... args)
     {
         tree_data_type data(std::forward<Args>(args)...);
-        if (contains(data.first))
+        const tree_data_type *existing = find_data_ptr(data.first);
+        if (existing != nullptr)
         {
-            return {find(data.first), false};
+            return {find(existing->first), false};
         }
 
         if (_root == nullptr)
@@ -948,18 +1004,5 @@ public:
         return end();
     }
 };
-
-template<typename tkey, typename tvalue, comparator<tkey> compare, std::size_t t>
-bool compare_pairs(const typename B_tree<tkey, tvalue, compare, t>::tree_data_type &lhs,
-                   const typename B_tree<tkey, tvalue, compare, t>::tree_data_type &rhs)
-{
-    return compare{}(lhs.first, rhs.first);
-}
-
-template<typename tkey, typename tvalue, comparator<tkey> compare, std::size_t t>
-bool compare_keys(const tkey &lhs, const tkey &rhs)
-{
-    return compare{}(lhs, rhs);
-}
 
 #endif
