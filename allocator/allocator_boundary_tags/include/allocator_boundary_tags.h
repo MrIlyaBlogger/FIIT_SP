@@ -117,4 +117,4 @@ private:
     boundary_iterator end() const noexcept;
 };
 
-#endif //MATH_PRACTICE_AND_OPERATING_SYSTEMS_ALLOCATOR_ALLOCATOR_BOUNDARY_TAGS_H
+#endif

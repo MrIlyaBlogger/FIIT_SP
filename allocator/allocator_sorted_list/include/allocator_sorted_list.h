@@ -135,4 +135,4 @@ private:
     sorted_iterator end() const noexcept;
 };
 
-#endif //MATH_PRACTICE_AND_OPERATING_SYSTEMS_ALLOCATOR_ALLOCATOR_SORTED_LIST_H
+#endif
