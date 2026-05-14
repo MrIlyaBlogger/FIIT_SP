@@ -679,8 +679,7 @@ public:
 
     tvalue &operator[](const tkey &key)
     {
-        auto [it, inserted] = emplace(key, tvalue{});
-        (void)inserted;
+        auto [it, _] = emplace(key, tvalue{});
         return it->second;
     }
 
