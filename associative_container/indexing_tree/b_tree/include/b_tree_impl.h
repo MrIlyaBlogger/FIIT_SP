@@ -7,6 +7,7 @@
 #include <initializer_list>
 #include <iterator>
 #include <memory_resource>
+#include <optional>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -92,12 +93,14 @@ private:
 
     size_t lower_index(const std::pmr::vector<tree_data_type> &keys, const tkey &key) const
     {
-        size_t index = 0;
-        while (index < keys.size() && less_key(keys[index].first, key))
-        {
-            ++index;
-        }
-        return index;
+        const auto it = std::lower_bound(
+            keys.begin(),
+            keys.end(),
+            key,
+            [this](const tree_data_type &data, const tkey &value) {
+                return less_key(data.first, value);
+            });
+        return static_cast<size_t>(std::distance(keys.begin(), it));
     }
 
     node_allocator nodes_allocator() const noexcept
@@ -289,6 +292,154 @@ private:
         return take_greatest(ptr->children.back());
     }
 
+
+    tree_data_type *find_data_ptr(const tkey &key)
+    {
+        node *current = _root;
+        while (current != nullptr)
+        {
+            const size_t index = lower_index(current->keys, key);
+            if (index < current->keys.size() && equivalent_key(current->keys[index].first, key))
+            {
+                return &current->keys[index];
+            }
+            if (current->leaf())
+            {
+                break;
+            }
+            current = current->children[index];
+        }
+        return nullptr;
+    }
+
+    const tree_data_type *find_data_ptr(const tkey &key) const
+    {
+        const node *current = _root;
+        while (current != nullptr)
+        {
+            const size_t index = lower_index(current->keys, key);
+            if (index < current->keys.size() && equivalent_key(current->keys[index].first, key))
+            {
+                return &current->keys[index];
+            }
+            if (current->leaf())
+            {
+                break;
+            }
+            current = current->children[index];
+        }
+        return nullptr;
+    }
+
+    const node *leftmost_node() const
+    {
+        const node *current = _root;
+        while (current != nullptr && !current->leaf()) current = current->children.front();
+        return current;
+    }
+
+    const node *rightmost_node() const
+    {
+        const node *current = _root;
+        while (current != nullptr && !current->leaf()) current = current->children.back();
+        return current;
+    }
+
+    template<typename Iter>
+    void next_key(Iter &it) const
+    {
+        if (it._is_end) return;
+        const tkey &key = it._key.value();
+        const node *current = _root;
+        const tree_data_type *candidate = nullptr;
+        while (current != nullptr)
+        {
+            size_t idx = lower_index(current->keys, key);
+            while (idx < current->keys.size() && !less_key(key, current->keys[idx].first)) ++idx;
+            if (idx < current->keys.size()) candidate = &current->keys[idx];
+            if (current->leaf()) break;
+            size_t child_idx = lower_index(current->keys, key);
+            while (child_idx < current->keys.size() && !less_key(key, current->keys[child_idx].first)) ++child_idx;
+            current = current->children[child_idx];
+        }
+        if (candidate == nullptr) { it._is_end = true; it._key.reset(); }
+        else { it._key = candidate->first; }
+    }
+
+    template<typename Iter>
+    void prev_key(Iter &it) const
+    {
+        if (it._is_end)
+        {
+            const node *rn = rightmost_node();
+            if (rn == nullptr || rn->keys.empty()) return;
+            it._is_end = false;
+            it._key = rn->keys.back().first;
+            return;
+        }
+        const tkey &key = it._key.value();
+        const node *current = _root;
+        const tree_data_type *candidate = nullptr;
+        while (current != nullptr)
+        {
+            size_t idx = lower_index(current->keys, key);
+            if (idx > 0) candidate = &current->keys[idx - 1];
+            if (current->leaf()) break;
+            current = current->children[idx];
+        }
+        if (candidate == nullptr) { it._is_end = true; it._key.reset(); }
+        else { it._key = candidate->first; }
+    }
+
+    size_t depth_of_key(const tkey &key) const
+    {
+        const node *current = _root; size_t depth = 0;
+        while (current != nullptr)
+        {
+            size_t idx = lower_index(current->keys, key);
+            if (idx < current->keys.size() && equivalent_key(current->keys[idx].first, key)) return depth;
+            if (current->leaf()) break;
+            current = current->children[idx]; ++depth;
+        }
+        throw std::out_of_range("B_tree iterator is invalidated");
+    }
+    size_t index_of_key(const tkey &key) const
+    {
+        const node *current = _root;
+        while (current != nullptr)
+        {
+            size_t idx = lower_index(current->keys, key);
+            if (idx < current->keys.size() && equivalent_key(current->keys[idx].first, key)) return idx;
+            if (current->leaf()) break;
+            current = current->children[idx];
+        }
+        throw std::out_of_range("B_tree iterator is invalidated");
+    }
+    size_t node_key_count(const tkey &key) const
+    {
+        const node *current = _root;
+        while (current != nullptr)
+        {
+            size_t idx = lower_index(current->keys, key);
+            if (idx < current->keys.size() && equivalent_key(current->keys[idx].first, key)) return current->keys.size();
+            if (current->leaf()) break;
+            current = current->children[idx];
+        }
+        throw std::out_of_range("B_tree iterator is invalidated");
+    }
+    bool node_is_leaf(const tkey &key) const
+    {
+        const node *current = _root;
+        while (current != nullptr)
+        {
+            size_t idx = lower_index(current->keys, key);
+            if (idx < current->keys.size() && equivalent_key(current->keys[idx].first, key)) return current->leaf();
+            if (current->leaf()) break;
+            current = current->children[idx];
+        }
+        throw std::out_of_range("B_tree iterator is invalidated");
+    }
+
     bool erase_inner(node *ptr, const tkey &key)
     {
         const size_t index = lower_index(ptr->keys, key);
@@ -396,16 +547,21 @@ public:
     class btree_iterator final
     {
         B_tree *_owner = nullptr;
-        std::vector<place> _order;
-        size_t _position = 0;
+        std::optional<tkey> _key;
+        bool _is_end = true;
 
-        const place &current() const
+        tree_data_type *current_data() const
         {
-            if (_position >= _order.size())
+            if (_owner == nullptr || _is_end || !_key.has_value())
             {
                 throw std::out_of_range("B_tree iterator is not dereferenceable");
             }
-            return _order[_position];
+            tree_data_type *data = _owner->find_data_ptr(_key.value());
+            if (data == nullptr)
+            {
+                throw std::out_of_range("B_tree iterator is invalidated");
+            }
+            return data;
         }
 
     public:
@@ -419,94 +575,49 @@ public:
         friend class B_tree;
         friend class btree_const_iterator;
 
-        explicit btree_iterator(B_tree *owner = nullptr, size_t position = 0) :
-            _owner(owner),
-            _order(owner == nullptr ? std::vector<place>{} : owner->order()),
-            _position(position)
-        {
-        }
+        explicit btree_iterator(B_tree *owner = nullptr, bool is_end = true) : _owner(owner), _is_end(is_end) {}
+        explicit btree_iterator(B_tree *owner, const tkey &key) : _owner(owner), _key(key), _is_end(false) {}
 
-        reference operator*() const
-        {
-            const auto &item = current();
-            return item.where->keys[item.index];
-        }
+        reference operator*() const { return *current_data(); }
+        pointer operator->() const { return current_data(); }
 
-        pointer operator->() const
-        {
-            return &(**this);
-        }
-
-        self &operator++()
-        {
-            ++_position;
-            return *this;
-        }
-
-        self operator++(int)
-        {
-            auto copy = *this;
-            ++(*this);
-            return copy;
-        }
-
-        self &operator--()
-        {
-            --_position;
-            return *this;
-        }
-
-        self operator--(int)
-        {
-            auto copy = *this;
-            --(*this);
-            return copy;
-        }
+        self &operator++() { _owner->next_key(*this); return *this; }
+        self operator++(int) { auto copy = *this; ++(*this); return copy; }
+        self &operator--() { _owner->prev_key(*this); return *this; }
+        self operator--(int) { auto copy = *this; --(*this); return copy; }
 
         bool operator==(const self &other) const noexcept
         {
-            return _owner == other._owner && _position == other._position;
+            if (_owner != other._owner || _is_end != other._is_end) return false;
+            if (_is_end) return true;
+            return _key == other._key;
         }
+        bool operator!=(const self &other) const noexcept { return !(*this == other); }
 
-        bool operator!=(const self &other) const noexcept
-        {
-            return !(*this == other);
-        }
-
-        size_t depth() const
-        {
-            return current().depth;
-        }
-
-        size_t current_node_keys_count() const
-        {
-            return current().where->keys.size();
-        }
-
-        bool is_terminate_node() const
-        {
-            return current().where->leaf();
-        }
-
-        size_t index() const
-        {
-            return current().index;
-        }
+        size_t depth() const { return _owner->depth_of_key(_key.value()); }
+        size_t current_node_keys_count() const { return _owner->node_key_count(_key.value()); }
+        bool is_terminate_node() const { return _owner->node_is_leaf(_key.value()); }
+        size_t index() const { return _owner->index_of_key(_key.value()); }
     };
 
     class btree_const_iterator final
     {
         const B_tree *_owner = nullptr;
-        std::vector<const_place> _order;
-        size_t _position = 0;
+        std::optional<tkey> _key;
+        bool _is_end = true;
 
-        const const_place &current() const
+        const tree_data_type *current_data() const
         {
-            if (_position >= _order.size())
+            if (_owner == nullptr || _is_end || !_key.has_value())
             {
                 throw std::out_of_range("B_tree const iterator is not dereferenceable");
             }
-            return _order[_position];
+            const tree_data_type *data = _owner->find_data_ptr(_key.value());
+            if (data == nullptr)
+            {
+                throw std::out_of_range("B_tree const iterator is invalidated");
+            }
+            return data;
         }
 
     public:
@@ -519,162 +630,87 @@ public:
 
         friend class B_tree;
 
-        explicit btree_const_iterator(const B_tree *owner = nullptr, size_t position = 0) :
-            _owner(owner),
-            _order(owner == nullptr ? std::vector<const_place>{} : owner->order()),
-            _position(position)
-        {
-        }
+        explicit btree_const_iterator(const B_tree *owner = nullptr, bool is_end = true) : _owner(owner), _is_end(is_end) {}
+        explicit btree_const_iterator(const B_tree *owner, const tkey &key) : _owner(owner), _key(key), _is_end(false) {}
+        btree_const_iterator(const btree_iterator &it) : _owner(it._owner), _key(it._key), _is_end(it._is_end) {}
 
-        btree_const_iterator(const btree_iterator &it) :
-            btree_const_iterator(it._owner, it._position)
-        {
-        }
-
-        reference operator*() const
-        {
-            const auto &item = current();
-            return item.where->keys[item.index];
-        }
-
-        pointer operator->() const
-        {
-            return &(**this);
-        }
-
-        self &operator++()
-        {
-            ++_position;
-            return *this;
-        }
-
-        self operator++(int)
-        {
-            auto copy = *this;
-            ++(*this);
-            return copy;
-        }
-
-        self &operator--()
-        {
-            --_position;
-            return *this;
-        }
-
-        self operator--(int)
-        {
-            auto copy = *this;
-            --(*this);
-            return copy;
-        }
-
+        reference operator*() const { return *current_data(); }
+        pointer operator->() const { return current_data(); }
+        self &operator++() { _owner->next_key(*this); return *this; }
+        self operator++(int) { auto copy = *this; ++(*this); return copy; }
+        self &operator--() { _owner->prev_key(*this); return *this; }
+        self operator--(int) { auto copy = *this; --(*this); return copy; }
         bool operator==(const self &other) const noexcept
         {
-            return _owner == other._owner && _position == other._position;
+            if (_owner != other._owner || _is_end != other._is_end) return false;
+            if (_is_end) return true;
+            return _key == other._key;
         }
-
-        bool operator!=(const self &other) const noexcept
-        {
-            return !(*this == other);
-        }
-
-        size_t depth() const
-        {
-            return current().depth;
-        }
-
-        size_t current_node_keys_count() const
-        {
-            return current().where->keys.size();
-        }
-
-        bool is_terminate_node() const
-        {
-            return current().where->leaf();
-        }
-
-        size_t index() const
-        {
-            return current().index;
-        }
+        bool operator!=(const self &other) const noexcept { return !(*this == other); }
+        size_t depth() const { return _owner->depth_of_key(_key.value()); }
+        size_t current_node_keys_count() const { return _owner->node_key_count(_key.value()); }
+        bool is_terminate_node() const { return _owner->node_is_leaf(_key.value()); }
+        size_t index() const { return _owner->index_of_key(_key.value()); }
     };
 
     class btree_reverse_iterator final
     {
         btree_iterator _base;
-
     public:
-        using value_type = tree_data_type_const;
-        using reference = tree_data_type &;
-        using pointer = tree_data_type *;
-        using iterator_category = std::bidirectional_iterator_tag;
-        using difference_type = ptrdiff_t;
-        using self = btree_reverse_iterator;
-
-        explicit btree_reverse_iterator(B_tree *owner = nullptr, size_t position = 0) : _base(owner, position) {}
+        using value_type = tree_data_type_const; using reference = tree_data_type &; using pointer = tree_data_type *; using iterator_category = std::bidirectional_iterator_tag; using difference_type = ptrdiff_t; using self = btree_reverse_iterator;
+        explicit btree_reverse_iterator(B_tree *owner = nullptr, bool is_end = true) : _base(owner, is_end) {}
+        explicit btree_reverse_iterator(B_tree *owner, const tkey &key) : _base(owner, key) {}
         btree_reverse_iterator(const btree_iterator &it) noexcept : _base(it) {}
         operator btree_iterator() const noexcept { return _base; }
         reference operator*() const { return *_base; }
         pointer operator->() const { return _base.operator->(); }
         self &operator++() { --_base; return *this; }
-        self operator++(int) { auto copy = *this; ++(*this); return copy; }
+        self operator++(int) { auto copy=*this; ++(*this); return copy; }
         self &operator--() { ++_base; return *this; }
-        self operator--(int) { auto copy = *this; --(*this); return copy; }
-        bool operator==(const self &other) const noexcept { return _base == other._base; }
-        bool operator!=(const self &other) const noexcept { return !(*this == other); }
-        size_t depth() const { return _base.depth(); }
-        size_t current_node_keys_count() const { return _base.current_node_keys_count(); }
-        bool is_terminate_node() const { return _base.is_terminate_node(); }
-        size_t index() const { return _base.index(); }
+        self operator--(int) { auto copy=*this; --(*this); return copy; }
+        bool operator==(const self &other) const noexcept { return _base==other._base; }
+        bool operator!=(const self &other) const noexcept { return !(*this==other); }
+        size_t depth() const { return _base.depth(); } size_t current_node_keys_count() const { return _base.current_node_keys_count(); } bool is_terminate_node() const { return _base.is_terminate_node(); } size_t index() const { return _base.index(); }
     };
 
     class btree_const_reverse_iterator final
     {
         btree_const_iterator _base;
-
     public:
-        using value_type = tree_data_type_const;
-        using reference = const tree_data_type &;
-        using pointer = const tree_data_type *;
-        using iterator_category = std::bidirectional_iterator_tag;
-        using difference_type = ptrdiff_t;
-        using self = btree_const_reverse_iterator;
-
-        explicit btree_const_reverse_iterator(const B_tree *owner = nullptr, size_t position = 0) : _base(owner, position) {}
+        using value_type = tree_data_type_const; using reference = const tree_data_type &; using pointer = const tree_data_type *; using iterator_category = std::bidirectional_iterator_tag; using difference_type = ptrdiff_t; using self = btree_const_reverse_iterator;
+        explicit btree_const_reverse_iterator(const B_tree *owner = nullptr, bool is_end = true) : _base(owner, is_end) {}
+        explicit btree_const_reverse_iterator(const B_tree *owner, const tkey &key) : _base(owner, key) {}
         btree_const_reverse_iterator(const btree_reverse_iterator &it) : _base(static_cast<btree_iterator>(it)) {}
         operator btree_const_iterator() const noexcept { return _base; }
         reference operator*() const { return *_base; }
         pointer operator->() const { return _base.operator->(); }
         self &operator++() { --_base; return *this; }
-        self operator++(int) { auto copy = *this; ++(*this); return copy; }
+        self operator++(int) { auto copy=*this; ++(*this); return copy; }
         self &operator--() { ++_base; return *this; }
-        self operator--(int) { auto copy = *this; --(*this); return copy; }
-        bool operator==(const self &other) const noexcept { return _base == other._base; }
-        bool operator!=(const self &other) const noexcept { return !(*this == other); }
-        size_t depth() const { return _base.depth(); }
-        size_t current_node_keys_count() const { return _base.current_node_keys_count(); }
-        bool is_terminate_node() const { return _base.is_terminate_node(); }
-        size_t index() const { return _base.index(); }
+        self operator--(int) { auto copy=*this; --(*this); return copy; }
+        bool operator==(const self &other) const noexcept { return _base==other._base; }
+        bool operator!=(const self &other) const noexcept { return !(*this==other); }
+        size_t depth() const { return _base.depth(); } size_t current_node_keys_count() const { return _base.current_node_keys_count(); } bool is_terminate_node() const { return _base.is_terminate_node(); } size_t index() const { return _base.index(); }
     };
 
     tvalue &at(const tkey &key)
     {
-        auto it = find(key);
-        if (it == end())
+        tree_data_type *data = find_data_ptr(key);
+        if (data == nullptr)
         {
             throw key_not_found();
         }
-        return it->second;
+        return data->second;
     }
 
     const tvalue &at(const tkey &key) const
     {
-        auto it = find(key);
-        if (it == cend())
+        const tree_data_type *data = find_data_ptr(key);
+        if (data == nullptr)
         {
             throw key_not_found();
         }
-        return it->second;
+        return data->second;
     }
 
     tvalue &operator[](const tkey &key)
@@ -690,16 +726,28 @@ public:
         return it->second;
     }
 
-    btree_iterator begin() { return btree_iterator(this, 0); }
-    btree_iterator end() { return btree_iterator(this, _size); }
+    btree_iterator begin() {
+        const node *ln = leftmost_node();
+        return (ln == nullptr || ln->keys.empty()) ? end() : btree_iterator(this, ln->keys.front().first);
+    }
+    btree_iterator end() { return btree_iterator(this, true); }
     btree_const_iterator begin() const { return cbegin(); }
     btree_const_iterator end() const { return cend(); }
-    btree_const_iterator cbegin() const { return btree_const_iterator(this, 0); }
-    btree_const_iterator cend() const { return btree_const_iterator(this, _size); }
-    btree_reverse_iterator rbegin() { return _size == 0 ? rend() : btree_reverse_iterator(this, _size - 1); }
-    btree_reverse_iterator rend() { return btree_reverse_iterator(this, static_cast<size_t>(-1)); }
-    btree_const_reverse_iterator rbegin() const { return _size == 0 ? rend() : btree_const_reverse_iterator(this, _size - 1); }
-    btree_const_reverse_iterator rend() const { return btree_const_reverse_iterator(this, static_cast<size_t>(-1)); }
+    btree_const_iterator cbegin() const {
+        const node *ln = leftmost_node();
+        return (ln == nullptr || ln->keys.empty()) ? cend() : btree_const_iterator(this, ln->keys.front().first);
+    }
+    btree_const_iterator cend() const { return btree_const_iterator(this, true); }
+    btree_reverse_iterator rbegin() {
+        const node *rn = rightmost_node();
+        return (rn == nullptr || rn->keys.empty()) ? rend() : btree_reverse_iterator(this, rn->keys.back().first);
+    }
+    btree_reverse_iterator rend() { return btree_reverse_iterator(this, true); }
+    btree_const_reverse_iterator rbegin() const {
+        const node *rn = rightmost_node();
+        return (rn == nullptr || rn->keys.empty()) ? rend() : btree_const_reverse_iterator(this, rn->keys.back().first);
+    }
+    btree_const_reverse_iterator rend() const { return btree_const_reverse_iterator(this, true); }
     btree_const_reverse_iterator crbegin() const { return rbegin(); }
     btree_const_reverse_iterator crend() const { return rend(); }
 
@@ -708,28 +756,14 @@ public:
 
     btree_iterator find(const tkey &key)
     {
-        auto items = order();
-        for (size_t i = 0; i < items.size(); ++i)
-        {
-            if (equivalent_key(items[i].where->keys[items[i].index].first, key))
-            {
-                return btree_iterator(this, i);
-            }
-        }
-        return end();
+        tree_data_type *data = find_data_ptr(key);
+        return data == nullptr ? end() : btree_iterator(this, data->first);
     }
 
     btree_const_iterator find(const tkey &key) const
     {
-        auto items = order();
-        for (size_t i = 0; i < items.size(); ++i)
-        {
-            if (equivalent_key(items[i].where->keys[items[i].index].first, key))
-            {
-                return btree_const_iterator(this, i);
-            }
-        }
-        return cend();
+        const tree_data_type *data = find_data_ptr(key);
+        return data == nullptr ? cend() : btree_const_iterator(this, data->first);
     }
 
     btree_iterator lower_bound(const tkey &key)
@@ -739,7 +773,7 @@ public:
         {
             if (!less_key(items[i].where->keys[items[i].index].first, key))
             {
-                return btree_iterator(this, i);
+                return btree_iterator(this, items[i].where->keys[items[i].index].first);
             }
         }
         return end();
@@ -752,7 +786,7 @@ public:
         {
             if (!less_key(items[i].where->keys[items[i].index].first, key))
             {
-                return btree_const_iterator(this, i);
+                return btree_const_iterator(this, items[i].where->keys[items[i].index].first);
             }
         }
         return cend();
@@ -763,9 +797,9 @@ public:
         auto items = order();
         for (size_t i = 0; i < items.size(); ++i)
         {
-            if (!less_key(items[i].where->keys[items[i].index].first, key))
+            if (less_key(key, items[i].where->keys[items[i].index].first))
             {
-                return btree_iterator(this, i);
+                return btree_iterator(this, items[i].where->keys[items[i].index].first);
             }
         }
         return end();
@@ -776,9 +810,9 @@ public:
         auto items = order();
         for (size_t i = 0; i < items.size(); ++i)
         {
-            if (!less_key(items[i].where->keys[items[i].index].first, key))
+            if (less_key(key, items[i].where->keys[items[i].index].first))
             {
-                return btree_const_iterator(this, i);
+                return btree_const_iterator(this, items[i].where->keys[items[i].index].first);
             }
         }
         return cend();
@@ -786,7 +820,7 @@ public:
 
     bool contains(const tkey &key) const
     {
-        return find(key) != cend();
+        return find_data_ptr(key) != nullptr;
     }
 
     void clear() noexcept
@@ -810,9 +844,10 @@ public:
     std::pair<btree_iterator, bool> emplace(Args &&... args)
     {
         tree_data_type data(std::forward<Args>(args)...);
-        if (contains(data.first))
+        const tree_data_type *existing = find_data_ptr(data.first);
+        if (existing != nullptr)
         {
-            return {find(data.first), false};
+            return {find(existing->first), false};
         }
 
         if (_root == nullptr)
@@ -906,7 +941,9 @@ public:
             _root = nullptr;
         }
 
-        return btree_iterator(this, std::min(position, _size));
+        if (_size == 0 || position >= _size) return end();
+        auto updated = order();
+        return btree_iterator(this, updated[position].where->keys[updated[position].index].first);
     }
 
     btree_iterator erase(btree_iterator pos)
@@ -947,18 +984,5 @@ public:
         return end();
     }
 };
-
-template<typename tkey, typename tvalue, comparator<tkey> compare, std::size_t t>
-bool compare_pairs(const typename B_tree<tkey, tvalue, compare, t>::tree_data_type &lhs,
-                   const typename B_tree<tkey, tvalue, compare, t>::tree_data_type &rhs)
-{
-    return compare{}(lhs.first, rhs.first);
-}
-
-template<typename tkey, typename tvalue, comparator<tkey> compare, std::size_t t>
-bool compare_keys(const tkey &lhs, const tkey &rhs)
-{
-    return compare{}(lhs, rhs);
-}
 
 #endif
