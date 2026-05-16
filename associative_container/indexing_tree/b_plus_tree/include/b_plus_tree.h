@@ -1,7 +1,7 @@
 #ifndef SYS_PROG_B_PLUS_TREE_H
 #define SYS_PROG_B_PLUS_TREE_H
 
-#include <b_tree.h>
+#include "../../b_tree/include/b_tree.h"
 
 template <typename tkey, typename tvalue, comparator<tkey> compare = std::less<tkey>, std::size_t t = 5>
 class BP_tree final : private compare
