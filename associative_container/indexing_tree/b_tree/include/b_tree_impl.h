@@ -348,47 +348,68 @@ private:
     template<typename Iter>
     void next_key(Iter &it) const
     {
-        if (it._is_end) return;
-        const tkey &key = it._key.value();
-        const node *current = _root;
-        const tree_data_type *candidate = nullptr;
-        while (current != nullptr)
+        if (it._is_end)
         {
-            size_t idx = lower_index(current->keys, key);
-            while (idx < current->keys.size() && !less_key(key, current->keys[idx].first)) ++idx;
-            if (idx < current->keys.size()) candidate = &current->keys[idx];
-            if (current->leaf()) break;
-            size_t child_idx = lower_index(current->keys, key);
-            while (child_idx < current->keys.size() && !less_key(key, current->keys[child_idx].first)) ++child_idx;
-            current = current->children[child_idx];
+            return;
         }
-        if (candidate == nullptr) { it._is_end = true; it._key.reset(); }
-        else { it._key = candidate->first; }
+
+        auto items = order();
+        for (size_t i = 0; i < items.size(); ++i)
+        {
+            const tkey &current_key = items[i].where->keys[items[i].index].first;
+            if (equivalent_key(current_key, it._key.value()))
+            {
+                if (i + 1 >= items.size())
+                {
+                    it._is_end = true;
+                    it._key.reset();
+                }
+                else
+                {
+                    it._key = items[i + 1].where->keys[items[i + 1].index].first;
+                }
+                return;
+            }
+        }
+
+        throw std::out_of_range("B_tree iterator is invalidated");
     }
 
     template<typename Iter>
     void prev_key(Iter &it) const
     {
+        auto items = order();
+
         if (it._is_end)
         {
-            const node *rn = rightmost_node();
-            if (rn == nullptr || rn->keys.empty()) return;
+            if (items.empty())
+            {
+                return;
+            }
             it._is_end = false;
-            it._key = rn->keys.back().first;
+            it._key = items.back().where->keys[items.back().index].first;
             return;
         }
-        const tkey &key = it._key.value();
-        const node *current = _root;
-        const tree_data_type *candidate = nullptr;
-        while (current != nullptr)
+
+        for (size_t i = 0; i < items.size(); ++i)
         {
-            size_t idx = lower_index(current->keys, key);
-            if (idx > 0) candidate = &current->keys[idx - 1];
-            if (current->leaf()) break;
-            current = current->children[idx];
+            const tkey &current_key = items[i].where->keys[items[i].index].first;
+            if (equivalent_key(current_key, it._key.value()))
+            {
+                if (i == 0)
+                {
+                    it._is_end = true;
+                    it._key.reset();
+                }
+                else
+                {
+                    it._key = items[i - 1].where->keys[items[i - 1].index].first;
+                }
+                return;
+            }
         }
-        if (candidate == nullptr) { it._is_end = true; it._key.reset(); }
-        else { it._key = candidate->first; }
+
+        throw std::out_of_range("B_tree iterator is invalidated");
     }
 
     size_t depth_of_key(const tkey &key) const
