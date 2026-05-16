@@ -386,7 +386,7 @@ TEST(bTreePositiveTests, test9)
     tree.emplace(193, std::string("l"));
     tree.emplace(534, std::string("m"));
 
-    auto b = tree.upper_bound(4);
+    auto b = tree.lower_bound(4);
     auto e = tree.lower_bound(102);
     std::vector<decltype(tree)::value_type> actual_result(b, e);
 
