@@ -4,6 +4,7 @@
 #include <pp_allocator.h>
 #include <allocator_test_utils.h>
 #include <allocator_with_fit_mode.h>
+#include <cstddef>
 #include <mutex>
 #include <cmath>
 
@@ -27,6 +28,11 @@ namespace __detail
 
         return ones_counter <= 1 ? index : index + 1;
     }
+
+    constexpr size_t align_up(size_t value, size_t alignment) noexcept
+    {
+        return (value + alignment - 1) / alignment * alignment;
+    }
 }
 
 class allocator_buddies_system final:
@@ -46,15 +52,13 @@ private:
 
     void *_trusted_memory;
 
-    /**
-     * TODO: You must improve it for alignment support
-     */
+    static constexpr size_t default_alignment = alignof(std::max_align_t);
 
     static constexpr const size_t allocator_metadata_size = sizeof(allocator_dbg_helper*) + sizeof(fit_mode) + sizeof(unsigned char) + sizeof(std::mutex);
 
-    static constexpr const size_t occupied_block_metadata_size = sizeof(block_metadata) + sizeof(void*);
+    static constexpr const size_t occupied_block_metadata_size = __detail::align_up(sizeof(block_metadata) + sizeof(void*), default_alignment);
 
-    static constexpr const size_t free_block_metadata_size = sizeof(block_metadata);
+    static constexpr const size_t free_block_metadata_size = __detail::align_up(sizeof(block_metadata), default_alignment);
 
     static constexpr const size_t min_k = __detail::nearest_greater_k_of_2(occupied_block_metadata_size);
 

@@ -30,7 +30,7 @@ namespace
     };
 
     constexpr size_t state_offset = align_up(sizeof(allocator_state), alignof(std::max_align_t));
-    constexpr size_t occupied_metadata_size = sizeof(buddy_header);
+    constexpr size_t occupied_metadata_size = align_up(sizeof(buddy_header), alignof(std::max_align_t));
 
     allocator_state *state_of(void *trusted) noexcept
     {
