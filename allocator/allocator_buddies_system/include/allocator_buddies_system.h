@@ -103,7 +103,15 @@ private:
 
     std::vector<allocator_test_utils::block_info> get_blocks_info_inner() const override;
 
-    /** TODO: Highly recommended for helper functions to return references */
+    static block_metadata &metadata_of(void *block) noexcept
+    {
+        return *static_cast<block_metadata *>(block);
+    }
+
+    static const block_metadata &metadata_of(const void *block) noexcept
+    {
+        return *static_cast<const block_metadata *>(block);
+    }
 
     class buddy_iterator
     {
