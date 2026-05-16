@@ -194,6 +194,39 @@ private:
       collect_leaves(c.get(), out);
   }
 
+  tkey min_key_of(node_base *n) const {
+    auto *cur = n;
+    while (!cur->is_leaf) {
+      auto *in = static_cast<inner_node *>(cur);
+      cur = in->children.front().get();
+    }
+    auto *lf = static_cast<leaf_node *>(cur);
+    return lf->data.front().first;
+  }
+
+  void refresh_separators(inner_node *parent) {
+    for (size_t i = 0; i < parent->keys.size(); ++i) {
+      parent->keys[i] = min_key_of(parent->children[i + 1].get());
+    }
+  }
+
+  void rebuild_separators_from_root() {
+    if (!_root || _root->is_leaf)
+      return;
+    std::vector<inner_node *> stack;
+    stack.push_back(static_cast<inner_node *>(_root.get()));
+    while (!stack.empty()) {
+      auto *node = stack.back();
+      stack.pop_back();
+      refresh_separators(node);
+      for (auto &child : node->children) {
+        if (!child->is_leaf) {
+          stack.push_back(static_cast<inner_node *>(child.get()));
+        }
+      }
+    }
+  }
+
 public:
   explicit BP_tree(const compare &cmp = compare(),
                    pp_allocator<value_type> alloc = pp_allocator<value_type>())
@@ -435,15 +468,154 @@ public:
     auto it = find(key);
     if (it == end())
       return end();
+
+    std::vector<std::pair<inner_node *, size_t>> path;
+    if (!_root->is_leaf) {
+      node_base *cur = _root.get();
+      while (!cur->is_leaf) {
+        auto *in = static_cast<inner_node *>(cur);
+        size_t idx = upper_idx_keys(in->keys, key, this);
+        path.push_back({in, idx});
+        cur = in->children[idx].get();
+      }
+    }
+
     auto *lf = it._node;
+    const bool removed_first = it._index == 0;
     lf->data.erase(lf->data.begin() + static_cast<ptrdiff_t>(it._index));
     --_size;
     if (_size == 0) {
       clear();
       return end();
     }
-    if (lf->data.empty())
-      rebuild_leaf_links();
+
+    constexpr size_t min_keys = t - 1;
+    if (_root->is_leaf) {
+      return lower_bound(key);
+    }
+
+    auto fix_leaf = [&](inner_node *parent, size_t child_idx) {
+      auto *leaf = static_cast<leaf_node *>(parent->children[child_idx].get());
+      if (leaf->data.size() >= min_keys)
+        return;
+
+      if (child_idx > 0) {
+        auto *left = static_cast<leaf_node *>(parent->children[child_idx - 1].get());
+        if (left->data.size() > min_keys) {
+          leaf->data.insert(leaf->data.begin(), std::move(left->data.back()));
+          left->data.pop_back();
+          refresh_separators(parent);
+          return;
+        }
+      }
+
+      if (child_idx + 1 < parent->children.size()) {
+        auto *right = static_cast<leaf_node *>(parent->children[child_idx + 1].get());
+        if (right->data.size() > min_keys) {
+          leaf->data.push_back(std::move(right->data.front()));
+          right->data.erase(right->data.begin());
+          refresh_separators(parent);
+          return;
+        }
+      }
+
+      if (child_idx > 0) {
+        auto *left = static_cast<leaf_node *>(parent->children[child_idx - 1].get());
+        left->data.insert(left->data.end(),
+                          std::make_move_iterator(leaf->data.begin()),
+                          std::make_move_iterator(leaf->data.end()));
+        parent->children.erase(parent->children.begin() + static_cast<ptrdiff_t>(child_idx));
+        parent->keys.erase(parent->keys.begin() + static_cast<ptrdiff_t>(child_idx - 1));
+      } else {
+        auto *right = static_cast<leaf_node *>(parent->children[child_idx + 1].get());
+        leaf->data.insert(leaf->data.end(),
+                          std::make_move_iterator(right->data.begin()),
+                          std::make_move_iterator(right->data.end()));
+        parent->children.erase(parent->children.begin() + static_cast<ptrdiff_t>(child_idx + 1));
+        parent->keys.erase(parent->keys.begin() + static_cast<ptrdiff_t>(child_idx));
+      }
+    };
+
+    auto fix_inner = [&](inner_node *parent, size_t child_idx) {
+      auto *node = static_cast<inner_node *>(parent->children[child_idx].get());
+      if (node->keys.size() >= min_keys)
+        return;
+
+      if (child_idx > 0) {
+        auto *left = static_cast<inner_node *>(parent->children[child_idx - 1].get());
+        if (left->keys.size() > min_keys) {
+          node->keys.insert(node->keys.begin(), parent->keys[child_idx - 1]);
+          node->children.insert(node->children.begin(), std::move(left->children.back()));
+          left->children.pop_back();
+          parent->keys[child_idx - 1] = left->keys.back();
+          left->keys.pop_back();
+          refresh_separators(parent);
+          return;
+        }
+      }
+
+      if (child_idx + 1 < parent->children.size()) {
+        auto *right = static_cast<inner_node *>(parent->children[child_idx + 1].get());
+        if (right->keys.size() > min_keys) {
+          node->keys.push_back(parent->keys[child_idx]);
+          node->children.push_back(std::move(right->children.front()));
+          right->children.erase(right->children.begin());
+          parent->keys[child_idx] = right->keys.front();
+          right->keys.erase(right->keys.begin());
+          refresh_separators(parent);
+          return;
+        }
+      }
+
+      if (child_idx > 0) {
+        auto *left = static_cast<inner_node *>(parent->children[child_idx - 1].get());
+        left->keys.push_back(parent->keys[child_idx - 1]);
+        left->keys.insert(left->keys.end(),
+                          std::make_move_iterator(node->keys.begin()),
+                          std::make_move_iterator(node->keys.end()));
+        left->children.insert(left->children.end(),
+                              std::make_move_iterator(node->children.begin()),
+                              std::make_move_iterator(node->children.end()));
+        parent->children.erase(parent->children.begin() + static_cast<ptrdiff_t>(child_idx));
+        parent->keys.erase(parent->keys.begin() + static_cast<ptrdiff_t>(child_idx - 1));
+      } else {
+        auto *right = static_cast<inner_node *>(parent->children[child_idx + 1].get());
+        node->keys.push_back(parent->keys[child_idx]);
+        node->keys.insert(node->keys.end(),
+                          std::make_move_iterator(right->keys.begin()),
+                          std::make_move_iterator(right->keys.end()));
+        node->children.insert(node->children.end(),
+                              std::make_move_iterator(right->children.begin()),
+                              std::make_move_iterator(right->children.end()));
+        parent->children.erase(parent->children.begin() + static_cast<ptrdiff_t>(child_idx + 1));
+        parent->keys.erase(parent->keys.begin() + static_cast<ptrdiff_t>(child_idx));
+      }
+    };
+
+    if (!path.empty()) {
+      auto [parent, child_idx] = path.back();
+      fix_leaf(parent, child_idx);
+      path.pop_back();
+    }
+
+    while (!path.empty()) {
+      auto [parent, child_idx] = path.back();
+      path.pop_back();
+      if (!parent->children[child_idx]->is_leaf) {
+        fix_inner(parent, child_idx);
+      }
+    }
+
+    if (!_root->is_leaf) {
+      auto *root_inner = static_cast<inner_node *>(_root.get());
+      if (root_inner->children.size() == 1) {
+        _root = std::move(root_inner->children.front());
+      }
+    }
+
+    if (removed_first)
+      rebuild_separators_from_root();
+    rebuild_leaf_links();
     return lower_bound(key);
   }
   bptree_iterator erase(bptree_iterator pos) {

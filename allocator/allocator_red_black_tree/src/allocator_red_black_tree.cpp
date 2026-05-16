@@ -291,34 +291,39 @@ namespace
 
     rb_block *select_block(allocator_state *state, size_t wanted) noexcept
     {
-        rb_block *selected = nullptr;
-        for (auto *block = state->first; block != nullptr; block = block->next)
+        if (state->root == nullptr)
         {
-            if (block->occupied || block->size < wanted)
-            {
-                continue;
-            }
+            return nullptr;
+        }
 
-            if (selected == nullptr)
+        if (state->mode == allocator_with_fit_mode::fit_mode::the_worst_fit)
+        {
+            auto *node = state->root;
+            while (node->right != nullptr)
             {
-                selected = block;
-                if (state->mode == allocator_with_fit_mode::fit_mode::first_fit)
-                {
-                    break;
-                }
-                continue;
+                node = node->right;
             }
+            return node->size >= wanted ? node : nullptr;
+        }
 
-            if (state->mode == allocator_with_fit_mode::fit_mode::the_best_fit && block->size < selected->size)
+        // first_fit and the_best_fit both map naturally to lower_bound(size>=wanted)
+        // in the RB tree ordered by (size, address).
+        rb_block *candidate = nullptr;
+        auto *current = state->root;
+        while (current != nullptr)
+        {
+            if (current->size >= wanted)
             {
-                selected = block;
+                candidate = current;
+                current = current->left;
             }
-            else if (state->mode == allocator_with_fit_mode::fit_mode::the_worst_fit && block->size > selected->size)
+            else
             {
-                selected = block;
+                current = current->right;
             }
         }
-        return selected;
+
+        return candidate;
     }
 
     void rebuild_links(allocator_state *state) noexcept
