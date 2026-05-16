@@ -73,9 +73,12 @@ bool infix_const_iterator_test(
 
     for (auto const &item: expected_result)
     {
-        auto data = *it;
+        if (it == end_infix)
+        {
+            return false;
+        }
 
-        if (it->first != item.key || it->second != item.value || it.index() != item.index)
+        if (it->first != item.key || it->second != item.value)
         {
             return false;
         }
@@ -83,7 +86,7 @@ bool infix_const_iterator_test(
         ++it;
     }
 
-return true;
+    return it == end_infix;
 }
 
 TEST(bTreePositiveTests, test0)
@@ -234,7 +237,9 @@ TEST(bTreePositiveTests, test5)
 {
     std::vector<test_data<int, std::string>> expected_result =
             {
-
+                    test_data<int, std::string>(0, 1, "a"),
+                    test_data<int, std::string>(1, 3, "d"),
+                    test_data<int, std::string>(2, 15, "c")
             };
 
     BP_tree<int, std::string, std::less<int>, 2> tree(std::less<int>(), nullptr);

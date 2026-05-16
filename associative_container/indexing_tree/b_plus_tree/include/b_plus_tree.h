@@ -53,6 +53,9 @@ private:
     static size_t lower_idx_keys(const std::vector<tkey>& v, const tkey& k, const BP_tree* self){
         return static_cast<size_t>(std::lower_bound(v.begin(), v.end(), k, [self](const tkey& d,const tkey& x){return self->less_key(d,x);})-v.begin());
     }
+    static size_t upper_idx_keys(const std::vector<tkey>& v, const tkey& k, const BP_tree* self){
+        return static_cast<size_t>(std::upper_bound(v.begin(), v.end(), k, [self](const tkey& x,const tkey& d){return self->less_key(x,d);})-v.begin());
+    }
 
     leaf_node* leftmost_leaf() const { return _first_leaf; }
 
@@ -61,7 +64,7 @@ private:
         node_base* cur = _root.get();
         while (!cur->is_leaf){
             auto* in = static_cast<inner_node*>(cur);
-            size_t i = lower_idx_keys(in->keys,key,this);
+            size_t i = upper_idx_keys(in->keys,key,this);
             cur = in->children[i].get();
         }
         return static_cast<leaf_node*>(cur);
@@ -87,7 +90,7 @@ private:
         }
 
         auto* in = static_cast<inner_node*>(cur);
-        size_t i = lower_idx_keys(in->keys, data.first, this);
+        size_t i = upper_idx_keys(in->keys, data.first, this);
         auto child_split = insert_rec(in->children[i].get(), std::move(data));
         if (!child_split.has) return {};
         in->keys.insert(in->keys.begin()+static_cast<ptrdiff_t>(i), child_split.sep);
