@@ -374,8 +374,6 @@ namespace
             return node->size >= wanted ? node : nullptr;
         }
 
-        // first_fit and the_best_fit both map naturally to lower_bound(size>=wanted)
-        // in the RB tree ordered by (size, address).
         rb_block *candidate = nullptr;
         auto *current = state->root;
         while (current != nullptr)
