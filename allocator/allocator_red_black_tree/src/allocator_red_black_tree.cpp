@@ -208,6 +208,74 @@ namespace
         state->root->node_color = color::black;
     }
 
+    
+    rb_block *tree_minimum(rb_block *node) noexcept
+    {
+        while (node != nullptr && node->left != nullptr)
+        {
+            node = node->left;
+        }
+        return node;
+    }
+
+    void transplant(allocator_state *state, rb_block *u, rb_block *v) noexcept
+    {
+        if (u->parent == nullptr)
+        {
+            state->root = v;
+        }
+        else if (u == u->parent->left)
+        {
+            u->parent->left = v;
+        }
+        else
+        {
+            u->parent->right = v;
+        }
+
+        if (v != nullptr)
+        {
+            v->parent = u->parent;
+        }
+    }
+
+    void erase_free_block(allocator_state *state, rb_block *node) noexcept
+    {
+        if (node == nullptr)
+        {
+            return;
+        }
+
+        if (node->left == nullptr)
+        {
+            transplant(state, node, node->right);
+        }
+        else if (node->right == nullptr)
+        {
+            transplant(state, node, node->left);
+        }
+        else
+        {
+            auto *successor = tree_minimum(node->right);
+            if (successor->parent != node)
+            {
+                transplant(state, successor, successor->right);
+                successor->right = node->right;
+                successor->right->parent = successor;
+            }
+
+            transplant(state, node, successor);
+            successor->left = node->left;
+            successor->left->parent = successor;
+            successor->node_color = node->node_color;
+        }
+
+        node->parent = nullptr;
+        node->left = nullptr;
+        node->right = nullptr;
+        node->node_color = color::black;
+    }
+
     void rebuild_free_tree(allocator_state *state) noexcept
     {
         state->root = nullptr;
@@ -466,9 +534,13 @@ bool allocator_red_black_tree::do_is_equal(const std::pmr::memory_resource &othe
         throw std::bad_alloc();
     }
 
+    erase_free_block(state, selected);
     selected->occupied = true;
     split_if_possible(selected, wanted);
-    rebuild_free_tree(state);
+    if (selected->next != nullptr && !selected->next->occupied)
+    {
+        insert_free_block(state, selected->next);
+    }
     return reinterpret_cast<unsigned char *>(selected) + block_metadata_size;
 }
 
@@ -488,13 +560,21 @@ void allocator_red_black_tree::do_deallocate_sm(void *at)
     }
 
     block->occupied = false;
-    merge_with_next(block);
+
+    if (block->next != nullptr && !block->next->occupied)
+    {
+        erase_free_block(state, block->next);
+        merge_with_next(block);
+    }
+
     if (block->previous != nullptr && !block->previous->occupied)
     {
+        erase_free_block(state, block->previous);
         block = block->previous;
         merge_with_next(block);
     }
-    rebuild_free_tree(state);
+
+    insert_free_block(state, block);
 }
 
 void allocator_red_black_tree::set_fit_mode(allocator_with_fit_mode::fit_mode mode)
