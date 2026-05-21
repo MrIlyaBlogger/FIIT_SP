@@ -469,6 +469,9 @@ public:
     if (it == end())
       return end();
 
+    auto next = it;
+    ++next;
+
     std::vector<std::pair<inner_node *, size_t>> path;
     if (!_root->is_leaf) {
       node_base *cur = _root.get();
@@ -491,7 +494,7 @@ public:
 
     constexpr size_t min_keys = t - 1;
     if (_root->is_leaf) {
-      return lower_bound(key);
+      return next == end() ? end() : lower_bound(next->first);
     }
 
     auto fix_leaf = [&](inner_node *parent, size_t child_idx) {
@@ -616,7 +619,7 @@ public:
     if (removed_first)
       rebuild_separators_from_root();
     rebuild_leaf_links();
-    return lower_bound(key);
+    return next == end() ? end() : lower_bound(next->first);
   }
   bptree_iterator erase(bptree_iterator pos) {
     if (pos == end())
