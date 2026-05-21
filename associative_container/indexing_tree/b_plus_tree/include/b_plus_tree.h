@@ -619,10 +619,20 @@ public:
     return lower_bound(key);
   }
   bptree_iterator erase(bptree_iterator pos) {
-    return pos == end() ? end() : erase(pos->first);
+    if (pos == end())
+      return end();
+    auto next = pos;
+    ++next;
+    erase(pos->first);
+    return next == end() ? end() : lower_bound(next->first);
   }
   bptree_iterator erase(bptree_const_iterator pos) {
-    return pos == cend() ? end() : erase(pos->first);
+    if (pos == cend())
+      return end();
+    auto next = pos;
+    ++next;
+    erase(pos->first);
+    return next == cend() ? end() : lower_bound(next->first);
   }
   bptree_iterator erase(bptree_const_iterator beg, bptree_const_iterator en) {
     while (beg != en) {
